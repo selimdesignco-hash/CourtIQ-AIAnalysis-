@@ -1,175 +1,167 @@
 from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from datetime import datetime
 import uuid
-import tempfile
-import cv2
-import numpy as np
-from ultralytics import YOLO
+import random
 
-app = FastAPI()
+app = FastAPI(title="CourtIQ Demo Analysis API")
 
-# Load YOLO model once at startup
-yolo_model = YOLO("yolov8n.pt")  # small + fast, good for MVP
+# Allow your Base44 / frontend domain to call this API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # in production, restrict to your real domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Simple mapping of user color words -> approximate BGR values
-COLOR_MAP = {
-    "royal-blue": (180, 80, 30),
-    "navy": (100, 40, 20),
-    "red": (40, 40, 200),
-    "green": (40, 150, 40),
-    "black": (20, 20, 20),
-    "white": (230, 230, 230),
-    # ...extend as needed
-}
 
-def color_distance(c1, c2):
-    c1 = np.array(c1, dtype=np.float32)
-    c2 = np.array(c2, dtype=np.float32)
-    return float(np.linalg.norm(c1 - c2))
-
-def estimate_jersey_color(frame, bbox):
-    """Take a player bbox and estimate average jersey color inside it."""
-    x1, y1, x2, y2 = map(int, bbox)
-    crop = frame[y1:y2, x1:x2]
-    if crop.size == 0:
-        return None
-
-    # Focus on middle vertical band (avoid shorts/shoes)
-    h, w, _ = crop.shape
-    mid = crop[int(h*0.2):int(h*0.7), int(w*0.2):int(w*0.8)]
-    avg_bgr = mid.reshape(-1, 3).mean(axis=0)
-    return tuple(avg_bgr.tolist())
-
-def is_target_team(avg_bgr, target_color_name, threshold=80.0):
-    if avg_bgr is None:
-        return False
-    target_bgr = COLOR_MAP.get(target_color_name)
-    if target_bgr is None:
-        return True  # if unknown, accept everyone (fallback)
-    dist = color_distance(avg_bgr, target_bgr)
-    return dist < threshold
-
-def sample_frames(video_path, fps_target=5):
-    """Yield frames at approx fps_target."""
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    step = max(int(round(fps / fps_target)), 1)
-    frame_idx = 0
-    out_idx = 0
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if frame_idx % step == 0:
-            yield out_idx, frame
-            out_idx += 1
-        frame_idx += 1
-
-    cap.release()
-
-def analyze_video(video_path: str, jersey_color: str):
+@app.get("/")
+def root():
     """
-    Core CV logic: run YOLO, filter players by jersey color, track simple stats.
-    This is MVP logic – can be improved over time.
+    Simple health check endpoint so Render / Replit / you can see it's running.
     """
-    players_stats = {}  # key: track_id, value: dict of stats
-    total_frames = 0
-
-    for sample_idx, frame in sample_frames(video_path, fps_target=3):
-        total_frames += 1
-
-        # Run YOLO
-        results = yolo_model(frame, verbose=False)[0]
-
-        # YOLOv8: boxes.xyxy, boxes.cls, boxes.id (if using tracking)
-        # For simple MVP, we don't track – we just approximate per-frame stats.
-        for box in results.boxes:
-            cls_id = int(box.cls)
-            # 0 is 'person' for COCO
-            if cls_id != 0:
-                continue
-
-            bbox = box.xyxy[0].tolist()
-            avg_bgr = estimate_jersey_color(frame, bbox)
-            if not is_target_team(avg_bgr, jersey_color):
-                continue
-
-            # For MVP, fake a track_id using bbox position
-            x1, y1, x2, y2 = bbox
-            center_x = (x1 + x2) / 2
-            track_id = int(center_x // 50)  # VERY rough grouping
-
-            stats = players_stats.setdefault(track_id, {
-                "frames_seen": 0,
-                "estimated_points": 0,
-                "fg_attempts": 0,
-                "threes_attempted": 0,
-                "drives_left": 0,
-                "drives_right": 0,
-            })
-            stats["frames_seen"] += 1
-
-            # TODO: refine – here we could look at motion vectors over time
-            # to approximate left/right drives, shot attempts, etc.
-
-    # Turn raw stats into nicer report
-    players_report = []
-    for track_id, stats in players_stats.items():
-        usage = stats["frames_seen"] / max(total_frames, 1)
-        players_report.append({
-            "number": track_id,  # placeholder until jersey OCR
-            "name": f"Player #{track_id}",
-            "estimated_points": int(stats["frames_seen"] * 0.15),
-            "fg_attempts": int(stats["frames_seen"] * 0.1),
-            "threes_attempted": int(stats["frames_seen"] * 0.03),
-            "usage_rate": round(float(usage), 2),
-            "tendencies": [
-                "MVP v0 – tendencies are heuristic.",
-                "Upgrade logic to use motion + ball tracking."
-            ],
-        })
-
-    report = {
-        "team_summary": {
-            "estimated_possessions": int(total_frames * 0.5),
-            "pace_comment": "Prototype CV estimate – refine with real event logic.",
-            "offensive_style": [
-                "Prototype: patterns not fully classified yet."
-            ],
-            "defensive_style": [
-                "Prototype: base defense classification TBD."
-            ]
-        },
-        "players": players_report,
-        "plays": [],     # TODO: detect plays from patterns
-        "defense": {},   # TODO: classify zones vs man
-        "notes_for_coach": [
-            "This is CourtIQ CV v0.",
-            "Real tendencies & play types improve as models and heuristics are upgraded."
-        ]
+    return {
+        "status": "ok",
+        "message": "CourtIQ demo backend is running.",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
     }
-    return report
+
 
 @app.post("/analyze")
-async def analyze_endpoint(
+async def analyze(
     file: UploadFile = File(...),
-    jersey_color: str = Form("royal-blue")
+    jersey_color: str = Form("royal-blue"),
+    game_title: str = Form("Untitled Game"),
+    opponent: str = Form("Unknown Opponent"),
 ):
-    # Save temp video
-    suffix = "." + (file.filename.split(".")[-1] if "." in file.filename else "mp4")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        video_path = tmp.name
-        content = await file.read()
-        tmp.write(content)
+    """
+    DEMO ONLY:
+    - Ignores the actual video.
+    - Immediately returns a fake but realistic scouting report.
+    - This is meant to power your Workspace UI until real CV is ready.
+    """
 
+    # Consume the upload so there's no error, but don't actually process it.
+    _ = await file.read()
+
+    # Use a UUID as a fake game_id
     game_id = str(uuid.uuid4())
-    report = analyze_video(video_path, jersey_color)
 
-    return JSONResponse({
-        "game_id": game_id,
-        "report": report
-    })
+    # Seed random with game_id so results are stable per game
+    random.seed(game_id)
+
+    possessions = random.randint(60, 80)
+    pace_comment = random.choice(
+        [
+            "Medium pace, similar to a typical high school game.",
+            "Fast-paced team that looks to run in transition.",
+            "Slow, grind-it-out pace focused on half-court sets.",
+        ]
+    )
+
+    offensive_styles = [
+        "Heavy high pick-and-roll with primary guard as ball handler",
+        "Spot-up shooters spaced in the corners",
+        "Occasional Horns set out of timeouts",
+    ]
+
+    defensive_styles = [
+        "Mostly man-to-man",
+        "2–3 zone in stretches to protect the paint",
+        "Soft full-court pressure after made baskets",
+    ]
+
+    # Fake players
+    def fake_player(number: int, role: str):
+        est_pts = random.randint(8, 22)
+        fga = random.randint(6, 15)
+        threes = random.randint(0, fga // 2)
+        usage = round(random.uniform(0.18, 0.32), 2)
+        tendencies_map = {
+            "guard": [
+                "Pull-up threes from the left wing",
+                "Strong right-hand drives",
+                "Likes high pick-and-roll as ball handler",
+            ],
+            "wing": [
+                "Catches and shoots from corners",
+                "Attacks closeouts with one-dribble pull-ups",
+                "Cuts backdoor when overplayed",
+            ],
+            "big": [
+                "Rolls hard out of ball screens",
+                "Crashes offensive glass every time",
+                "Prefers finishing over left shoulder",
+            ],
+        }
+        return {
+            "number": number,
+            "name": f"{role.title()} #{number}",
+            "estimated_points": est_pts,
+            "fg_attempts": fga,
+            "threes_attempted": threes,
+            "usage_rate": usage,
+            "tendencies": tendencies_map.get(role, []),
+        }
+
+    players = [
+        fake_player(3, "guard"),
+        fake_player(12, "wing"),
+        fake_player(15, "big"),
+    ]
+
+    plays = [
+        {
+            "name": "High PnR",
+            "frequency_estimate": "40% of half-court possessions",
+            "description": "Primary guard uses a high screen from the big at the top. Big rolls hard; shooters are spaced in both corners.",
+        },
+        {
+            "name": "Horns set",
+            "frequency_estimate": "15% of half-court possessions",
+            "description": "Both bigs start at the elbows. Guard chooses a side ball screen, weak-side shooter lifts to the slot.",
+        },
+        {
+            "name": "Baseline out-of-bounds (BLOB – box)",
+            "frequency_estimate": "Used on most baseline inbounds",
+            "description": "Box alignment into screen-the-screener action for a corner three.",
+        },
+    ]
+
+    defense = {
+        "base_defense": "Man-to-man",
+        "zone_usage": "2–3 zone roughly 20% of the time, usually after timeouts or late in games.",
+        "pressure": "Soft full-court man pressure after makes; mostly to slow you down, not to trap.",
+        "key_defenders": [
+            "Primary guard heats up the ball in the backcourt.",
+            "Big protects the rim but can be late on closeouts.",
+        ],
+    }
+
+    notes_for_coach = [
+        "Make their primary guard work on defense — attack him in switches to tire him out.",
+        f"Force their creators toward their weaker hand and go under on ball screens unless they are hot from three.",
+        "Use 5-out or pick-and-pop actions to pull their big away from the rim.",
+    ]
+
+    report = {
+        "video_path": f"demo://{file.filename}",
+        "jersey_color_analyzed": jersey_color,
+        "game_title": game_title,
+        "opponent": opponent,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "team_summary": {
+            "estimated_possessions": possessions,
+            "pace_comment": pace_comment,
+            "offensive_style": offensive_styles,
+            "defensive_style": defensive_styles,
+        },
+        "players": players,
+        "plays": plays,
+        "defense": defense,
+        "notes_for_coach": notes_for_coach,
+    }
+
+    return JSONResponse({"game_id": game_id, "report": report})
