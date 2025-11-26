@@ -1,7 +1,3 @@
 fastapi
 uvicorn[standard]
 python-multipart
-opencv-python
-numpy
-ultralytics   # YOLOv8
-scikit-learn  # for color clustering (optional)
