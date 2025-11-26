@@ -33,3 +33,12 @@ Returns:
     "notes_for_coach": [...]
   }
 }
+## What this does now (v0)
+
+- Uses YOLOv8 to detect players in sampled video frames.
+- Uses the jersey color provided by the user to decide which team to focus on.
+- Estimates simple per-player stats from how often they appear.
+- Returns a JSON report consumed by the CourtIQ frontend.
+
+This is an MVP computer vision pipeline. It is **not** perfect, but it is
+performing **real analysis on the video** instead of returning fake data.
